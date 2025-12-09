@@ -1,0 +1,92 @@
+#!/usr/bin/env Rscript
+
+# Get bed files for each Puffin-D predicted dataset from R chunks created with rds_chunker.rscript.
+# Experimental GROcap bed file is created separately within lift_grocap_to_t2t_positions.sh.
+# These will populate the datasets_positions.tsv file used as input for summarise_repeat_nonrepeat.rscript to create the repeat/non-repeat summary table.
+# Requires dataset-specific coordinates.tsv files from make_output_bed.sh.
+
+# Rscript 1.chunks_to_positions_and_clusters.R <data_name> <coordinates.tsv> <chunks_dir> <threshold> <max_gap> <out_prefix> [workers]
+# E.g.: Rscript 1.chunks_to_positions_and_clusters.R "T2T_Forward" "/puffin_outputs/T2T Forward/coordinates.tsv" "/T2T_forward_chunks" 0.10 25 forward 8
+
+library(data.table)
+library(IRanges)
+library(GenomicRanges)
+library(future.apply)
+
+args <- commandArgs(trailingOnly=TRUE)
+
+data_name  <- args[1]
+bed_file   <- args[2]
+chunks_dir <- args[3]
+thresh     <- as.numeric(args[4])
+max_gap    <- as.integer(args[5])
+prefix     <- args[6]
+workers    <- if (length(args) >= 7) as.integer(args[7]) else 6
+
+# Load window index (the 4 columns: Filename, Chromosome, Start, Stop)
+T2T_bed <- fread(file = bed_file)
+if (ncol(T2T_bed) < 4) stop("Check the input TSV columns are Filename, Chromosome, Start, Stop: ", bed_file)
+setnames(T2T_bed, c("Filename","Chromosome","Start","Stop"))
+T2T_bed[, Start := as.integer(Start)]
+setkey(T2T_bed, Filename)
+
+# List chunk files
+chunk_files <- list.files(chunks_dir,
+                          pattern = paste0("^", data_name, "_chunk_\\d+\\.rds$"),
+                          full.names = TRUE)
+
+# Detect score column from first chunk
+detect_score_col <- function(rds){
+  x <- readRDS(rds)
+  cand <- grep("GRO.*forward|GRO_CAP.*forward", names(x), value=TRUE)
+  if (length(cand) < 1) stop("No forward-score column found in chunk: ", rds)
+  cand[1]
+}
+score_col <- detect_score_col(chunk_files[1])
+message("Using score column: ", score_col)
+
+# Parallel over chunks to return chromosome & position for significant bases
+plan(multisession, workers = workers)
+
+extract_sig <- function(cf, score_col, T2T_bed) {
+  chunk <- readRDS(cf)[, .(Filename, val = get(score_col))]
+  # Per-record index
+  chunk[, idx := seq_len(.N), by = Filename]
+  # Join to get chromosome and window start
+  chunk <- T2T_bed[chunk, on = "Filename", nomatch = 0L]
+  # Genomic position
+  chunk[, pos := Start + idx - 1L]
+  # Threshold
+  chunk[val >= thresh, .(Chromosome, position = pos)]
+}
+
+sig_list <- future_lapply(chunk_files, extract_sig, score_col = score_col, T2T_bed = T2T_bed)
+sig_positions <- rbindlist(sig_list, use.names=TRUE, fill=TRUE)
+rm(sig_list)
+
+# Write 1-bp positions BED
+pos_bed <- sig_positions[, .(chr = Chromosome, start = position, end = position + 1L)]
+setorder(pos_bed, chr, start)
+fwrite(pos_bed, paste0(prefix,"_positions.bed"), sep="\t", col.names=FALSE)
+
+# Save RDS for later reuse
+saveRDS(sig_positions, file = paste0(prefix, "_positions.rds"), compress = "xz")
+
+# Make clusters with max_gap per chromosome
+cl_by_chr <- split(sig_positions$position, sig_positions$Chromosome)
+gr_list <- lapply(names(cl_by_chr), function(chr){
+  pos <- sort(unique(cl_by_chr[[chr]]))
+  gr  <- GRanges(seqnames = chr, ranges = IRanges(start = pos + 1L, width = 1L))
+  reduce(gr, min.gapwidth = max_gap + 1L)
+})
+clusters <- do.call(c, unname(gr_list))
+
+# Write cluster BED
+cl_bed <- data.table(chr = as.character(seqnames(clusters)),
+                     start = start(clusters) - 1L,
+                     end   = end(clusters))
+setorder(cl_bed, chr, start)
+fwrite(cl_bed, paste0(prefix,"_clusters.bed"), sep="\t", col.names=FALSE)
+
+message("Wrote: ", paste0(prefix,"_positions.bed"), " and ", paste0(prefix,"_clusters.bed"))
+

@@ -1,0 +1,98 @@
+#!/usr/bin/env Rscript
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+args <- commandArgs(trailingOnly = TRUE)
+
+in_tsv <- args[1]
+out_pre <- args[2]
+
+df <- read_tsv(in_tsv, show_col_types = FALSE)
+
+# Order to use when present
+order_vec <- c(
+  "Experimental_GROcap",
+  "Forward",
+  "Reverse_repeats",
+  "Reverse_non-repeats",
+  "Shuffle_repeats",
+  "Shuffle_non-repeats",
+  "Global_mono_shuffle"
+)
+
+# Easy Names
+label_map <- c(
+  Experimental_GROcap    = "Experimental GRO-cap",
+  Forward                = "T2T Forward",
+  Reverse_repeats        = "Reversed Repeats",
+  `Reverse_non-repeats`  = "Reversed Non-repeats",
+  Shuffle_repeats        = "Global Mono-shuffle in Repeats",
+  `Shuffle_non-repeats`  = "Global Mono-shuffle in Non-repeats",
+  Global_mono_shuffle    = "Global Mono-shuffle"
+)
+
+# Plotting Function
+make_plot <- function(xdf, outfile) {
+  # keep only rows that exist, then order + label
+  keep_levels <- intersect(order_vec, xdf$dataset)
+  xdf <- xdf %>%
+    mutate(
+      dataset = factor(dataset,
+                       levels = keep_levels,
+                       labels = label_map[keep_levels])
+    )
+  
+  # Pivot longer
+  long <- xdf %>%
+    pivot_longer(
+      c(repeat_per_kb, nonrepeat_per_kb),
+      names_to = "class", values_to = "per_kb"
+    ) %>%
+    mutate(class = recode(class,
+                          repeat_per_kb = "Repeats",
+                          nonrepeat_per_kb = "Non-repeats"))
+  
+  cols <- c("Repeats" = "#E64F00",
+            "Non-repeats" = "#56B5E6")
+  
+  # Plot
+  p <- ggplot(long, aes(x = dataset, y = per_kb, fill = class)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.72,
+             color = "black", linewidth = 0.2) +
+    scale_fill_manual(values = cols, name = NULL) +
+    scale_y_continuous(
+      breaks = pretty_breaks(n = 8),
+      labels = label_number(accuracy = 0.01),
+      expand = expansion(mult = c(0, 0.05))
+    ) +
+    coord_cartesian(ylim = c(0, max(long$per_kb, na.rm = TRUE) * 1.08)) +
+    labs(
+      x = NULL,
+      y = "Transcription Start Sites per kb"
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      axis.text.x  = element_text(angle = 30, hjust = 1, vjust = 1, margin = margin(t = 4)),
+      axis.title.y = element_text(margin = margin(r = 8)),
+      legend.position = "bottom",
+      legend.key.height = unit(0.6, "lines"),
+      plot.caption = element_text(size = 9, hjust = 1, margin = margin(t = 6))
+    )
+  
+  ggsave(outfile, p, width = 8, height = 4.8, dpi = 1200)
+  invisible(p)
+}
+
+# Exclude Reverse_* (keep GRO-cap, Forward, two Shuffles, Global Mono)
+df_no_reverse <- df %>%
+  filter(!dataset %in% c("Reverse_repeats", "Reverse_non-repeats"))
+make_plot(df_no_reverse, paste0(out_pre, "_perkb_no_reverse.png"))
+
+# Exclude Shuffle_* (keep GRO-cap, Forward, two Reverses, Global Mono)
+df_no_shuffle <- df %>%
+  filter(!dataset %in% c("Shuffle_repeats", "Shuffle_non-repeats"))
+make_plot(df_no_shuffle, paste0(out_pre, "_perkb_no_shuffle.png"))

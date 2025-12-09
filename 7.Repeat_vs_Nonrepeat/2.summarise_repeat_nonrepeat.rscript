@@ -1,0 +1,85 @@
+#!/usr/bin/env Rscript
+
+# Rscript summarise_repeat_nonrepeat.R repeats.bed datasets_positions.tsv [out_prefix]
+# datasets_positions.tsv has two tab-separated columns: name \t bed_path
+
+library(data.table)
+library(IRanges)
+library(GenomicRanges)
+
+args <- commandArgs(trailingOnly=TRUE)
+
+rep_bed    <- args[1]
+ds_tsv     <- args[2]
+out_prefix <- ifelse(length(args)>=3, args[3], "out_summary")
+
+# Functions
+read_bed_gr <- function(bed) {
+  dt <- fread(bed, col.names=c("chr","start","end"))
+  nc <- sub(".*?(NC_\\d+\\.\\d).*", "\\1", dt$chr)
+  has_nc <- grepl("^NC_\\d+\\.\\d$", nc)
+  dt[, chr := ifelse(has_nc, nc, chr)]
+  GRanges(seqnames = dt$chr, ranges = IRanges(start = dt$start + 1L, end = dt$end))
+}
+is_positions <- function(gr) length(gr) > 0 && all(width(gr) == 1L)
+
+majority_label <- function(gr_features, gr_rep_mask) {
+  if (length(gr_features) == 0L) {
+    return(data.table(chr=character(), start=integer(), end=integer(), label=character()))
+  }
+  hits <- findOverlaps(gr_features, gr_rep_mask)
+  rep_bp <- integer(length(gr_features))
+  if (length(hits) > 0L) {
+    ol <- pintersect(gr_features[queryHits(hits)], gr_rep_mask[subjectHits(hits)])
+    rep_bp[queryHits(hits)] <- rep_bp[queryHits(hits)] + width(ol)
+  }
+  lab <- ifelse(rep_bp / width(gr_features) >= 0.5, "repeat", "nonrepeat")
+  data.table(chr = as.character(seqnames(gr_features)),
+             start = start(gr_features) - 1L,
+             end   = end(gr_features),
+             label = lab)
+}
+
+summarise_one <- function(name, bed_path, gr_rep) {
+  gr <- read_bed_gr(bed_path)
+  mode_tag <- if (is_positions(gr)) "positions" else "clusters"
+  dt <- majority_label(gr, gr_rep)
+  nrep <- sum(dt$label=="repeat")
+  nnon <- sum(dt$label=="nonrepeat")
+  data.table(
+    dataset = name,
+    n_repeat = nrep,
+    n_nonrepeat = nnon,
+    frac_repeat = ifelse(nrep+nnon>0, nrep/(nrep+nnon), NA_real_),
+    frac_nonrepeat = ifelse(nrep+nnon>0, nnon/(nrep+nnon), NA_real_),
+    mode = mode_tag,
+    Total = nrep + nnon
+  )
+}
+
+# Load repeat mask bed
+gr_rep <- read_bed_gr(rep_bed)
+
+# Load datasets from dataset list
+ds <- fread(ds_tsv,
+  sep = "\t",
+  header = FALSE,
+  col.names = c("name","bed"),
+  quote = "",
+  blank.lines.skip = TRUE,
+  data.table = TRUE
+)
+
+print(ds)
+
+# Create Summary Table
+out <- rbindlist(lapply(seq_len(nrow(ds)), function(i) {
+  summarise_one(ds$name[i], ds$bed[i], gr_rep)
+}), use.names=TRUE)
+
+# Keep rows in input order
+out[, dataset := factor(dataset, levels = ds$name)]
+setorder(out, dataset)
+
+fwrite(out, paste0(out_prefix, "_summary.tsv"), sep="\t")
+cat("Wrote:", paste0(out_prefix, "_summary.tsv"), "\n")

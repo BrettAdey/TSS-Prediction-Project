@@ -1,0 +1,84 @@
+#!/usr/bin/env Rscript
+
+### T2T Preprocessing script for generating .rds chunks ###
+# This script loads a .npy file containing Puffin-D output data, splits it into manageable
+# chunks, and saves each chunk as an .rds file. These chunks can then be
+# used by the T2T Analysis script.
+
+#   Rscript rds_chunker.R [data_name]
+#   e.g.:
+#   Rscript rds_chunker.R T2T_Forward
+
+# data_name should be the root of the .npy file (e.g. "T2T_Reversed").
+# A folder named "[data_name]_chunks" will be created, containing chunked .rds files.
+
+# Load Libraries
+#install.packages("reticulate", repos = "http://cran.us.r-project.org")
+#install.packages("data.table", repos = "http://cran.us.r-project.org")
+library(reticulate)
+library(data.table)
+
+# Store the data_name argument
+args <- commandArgs(trailingOnly = TRUE)
+data_name <- args[1]
+message(paste0("Data name: ", data_name))
+
+# Load the Puffin-D Data
+message("Reading data...")
+np <- import("numpy")
+all_data <- np$load(paste0(data_name, ".npy"), allow_pickle = TRUE)
+all_data <- all_data[[1]]
+message("Data loaded.")
+
+# Initialize chunk variables
+  chunk_size <- 100  # Number of arrays per chunk file
+  chunk_counter <- 1
+  all_data_dt <- data.table()
+  
+  chunk_file_prefix <- paste0(data_name, "_chunk_")  # Filename prefix for saved chunks
+ 
+  # Create output folder if it doesn't exist:
+  out_dir <- paste0(data_name, "_chunks/")
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+  
+### Make & Save Chunks ###
+# Loop through each category
+  for (category in names(all_data)) {
+  arrays    <- all_data[[category]]$arrays
+  filenames <- all_data[[category]]$filenames 
+
+  # Loop through each array in the category
+  for (i in seq_along(arrays)) {
+    array <- arrays[[i]]
+   # Select the first slice of the 3d array (1x100000) and only keep data from 'GRO_CAP (forward strand)'
+    array_dt <- data.table(`GRO_CAP (forward strand)` = array[1, ])
+
+    # Attach the category label to each row
+    array_dt[, Category := category]
+    
+    # Attach the original .npy filename to each row
+    array_dt[, Filename := filenames[i]]
+
+    # Save these rows to all_data_dt
+    all_data_dt <- rbindlist(list(all_data_dt, array_dt), use.names = TRUE, fill = TRUE)
+
+    # Save and clear memory after every chunk
+    if (i %% chunk_size == 0) {
+      chunk_filename <- paste0(chunk_file_prefix, chunk_counter, ".rds")
+      saveRDS(all_data_dt, file.path(out_dir, chunk_filename))
+      message(paste("Saved chunk", chunk_counter, "to", chunk_filename))
+      
+      all_data_dt <- data.table()
+      chunk_counter <- chunk_counter + 1
+    }
+  }
+  }
+
+# Save any remaining data after the loop finishes
+  if (nrow(all_data_dt) > 0) {
+    chunk_filename <- paste0(chunk_file_prefix, chunk_counter, ".rds")
+    saveRDS(all_data_dt, file.path(out_dir, chunk_filename))
+    message(paste("Saved final chunk", chunk_counter, "to", chunk_filename))
+  }
+  
+  message("All chunks have been saved.")
