@@ -90,40 +90,26 @@ hprt1_df$Easy_Name <- factor(
 
 ### Experimental GRO-cap ###
 
-# HPRT1 1-based inclusive window
-S1 <- 134429875L
+# HPRT1 (0-based half-open)
+S0 <- 134429874L
 E1 <- 134529874L
-stopifnot((E1 - S1 + 1L) == 100000L)
 
 # Load BEDGraph
-grocap_exp_raw <- fread(
-  bedgraph_path,
-  col.names = c("Chrom", "Start0", "End1", "ReadCount")
-)
+bg <- fread(bedgraph_path, col.names = c("Chrom", "Start0", "End1", "ReadCount"))
 
-# Convert to 1-based closed, clip to S1-E1 window, and drop empty rows
-grocap_exp_raw <- grocap_exp_raw %>%
-  mutate(
-    start1 = Start0 + 1L,
-    end1   = End1,
-    clip_start = pmax.int(start1, S1),
-    clip_end   = pmin.int(end1,   E1),
-    clip_width = pmax.int(0L, clip_end - clip_start + 1L)
-  ) %>%
-  filter(clip_width > 0L)
+# Create an index for each covered base
+pos1 <- (bg$Start0 - S0) + 1L
 
-# Map clipped coordinates to the 1-100000 window
-rng_win <- IRanges(
-  start = grocap_exp_raw$clip_start - S1 + 1L,
-  end   = grocap_exp_raw$clip_end   - S1 + 1L
-)
+# Get 1bp range per covered base
+rng <- IRanges(start = pos1, width = 1L)
 
-# Force length to 100000 so uncovered positions are zeros
-cov_rle <- coverage(rng_win, weight = grocap_exp_raw$ReadCount, width = 100000L)
-grocap_vec <- as.integer(cov_rle)  # length == 100000
+# At each 1bp range, add the corresponding read count. Define 100kb width, so uncovered positions (those not in the covered 1bp ranges) become zeros
+cov_rle <- coverage(rng, weight = bg$ReadCount, width = 100000L)
 
-stopifnot(length(grocap_vec) == 100000L)
+# Convert to integer vector
+grocap_vec <- as.integer(cov_rle)
 
+# Create a dataframe in the same shape as the Puffin-D predicted data
 grocap_exp <- data.frame(
   Easy_Name = "HPRT1 Experimental",
   Category  = "HPRT1 Experimental",
@@ -172,9 +158,9 @@ ggsave(
 combined_df %>%
   filter(Easy_Name %in% c("HPRT1 Experimental", "HPRT1")) %>%
   group_by(Easy_Name) %>%
-  summarise(Count_gt1 = sum(GRO_CAP_Forward_Strand_Binned > 0),
+  summarise(Count = sum(GRO_CAP_Forward_Strand_Binned > 0),
             Total_Positions = n(),
-            Fraction_gt1 = Count_gt1 / Total_Positions)
+            Fraction = Count / Total_Positions)
 
 # View frequency of counts
 table(combined_df$GRO_CAP_Forward_Strand_Binned[combined_df$Easy_Name == "HPRT1 Experimental"])
